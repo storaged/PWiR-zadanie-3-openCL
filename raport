@@ -1,0 +1,100 @@
+Krzysztof Gogolewski, nr ind. 291538    | 
+PWIR 2012/13 zadanie 2                  |
+________________________________________|
+
+Raport do proponowanego rozwiązania. 
+Ostateczna wesja programu znajduje sie w katalogu ./2.0/
+
+----------------------------------------
+1. Wyjściowy algorytm
+
+W moim programie zastosowałem prawdopodobnie najpopularniejszy sposób rozwiązania problemu k najbliższych sąsiadów -
+- poprzez wyznaczenie macierzy sąsiedztwa, tzn wyznacznie odległości (euklidesowej) każdego z elementów zbioru testowego
+od wszystkich obiektów ze zbioru treningowego. Następnie wyznaczenie k najbliższych obiektów zbioru treningowego i przeprowadzenie
+głosowania, tzn: każdy z sąsiadów oddaje głos na labelkę, którą sam reprezentuje. Labelka posiadająca najwięcej głosów zostaje 
+przyporządkowana do rozważanego elementu testowego.
+
+----------------------------------------
+
+2. Wersja 0.0
+
+Do sprawdzenia czasu działania powyższej metody zaimplementowano ją jako wersję 0.0 rozwiązania zadania.
+program znajduje się w katalogu /0.0, wymaga kompilacji poleceniem make. 
+Wydaje się, że program nie wyznacza poprawnego rozwiązania problemu, chociażby w przypadku rozwiązywania konfliktu jednakowej ilości głosów. 
+Jednak nie było główną to główną motywacją tej części rozwiązania. Chodziło o ustawienie pewnego progu. 
+Czasu wykonania algorytmu do któego będzie można się odnosić. 
+
+szacowany czas: (wyznacznie macierzy + znalezienie k najblizszych(sort)) O(q*n*d + q*n*log(n)) 
+----------------------------------------
+
+3. Wersja 1.0
+
+Tu rozpoczyna się właściwa część zadania implementację przeniesiono na GPU. 
+Użyto następujących struktur do wykonania obliczeń:
+* pamiec globalna, tablice danych (alokacja w programie hosta): 
+    - dane treningowe i testowe [ rozmiar: (n + q) * d * sizeof(float) + n * sizeof(uint) ] 
+    - decyzje (przyporzadkowane labelki) [rozmiar: q * sizeof(uint) ]
+    - stałe początkowe: n, q, k, l, d
+* pamiec lokalna, tablice dancyh:
+    - odleglosci od k najblizszych sasiadow [k * sizeof(float)]
+    - labelki w/w sasiadow [k * sizeof(uint)]
+    - glosowanie [l * sizeof(uint)]
+
+Pomysł polegał na utworzeniu q grup, w każdej grupie jeden wątek odpowiedzialny za wyznaczenie k najbliższych sąsiadów.
+Ponadto nie przetrzymujemy całej macierzy odleglosci, a tylko k najblizszych dotychczas sprawdzonych obiektow ze zbioru traningowego.
+W tym celu pamietamy najdalszy element ktory do tej pory sprawdzilismy i w razie napotkania blizszego podmieniamy.
+Okupujemy to liniowym wyszukiwaniem nowego kandydata na najdalszego sasiada, jednak jest to czas liniowy wzgledem k, ktory w praktyce jest pomijalny.
+Oczywiście dodatkowo zapamiętujemy również labelki odpowiadające najbliższym sąsiadom. 
+Zysk tego rozwiązania to redukcja czasu wykonania algorytmu poprzez rozbicie go na k rozdzielnych zadan
+
+szacowany czas: (wyznaczenie k najblizszych sasiadow) O(n*d*k), zważywszy na to, że k << q, redukcja wydaje się być rozsądna
+
+----------------------------------------
+
+4. Wersja 1.5 
+
+kolejna wersja opiera się na wykorzystaniu podziału na grupy robocze, których działa więcej niż jeden (np 32) wątki jednocześnie. 
+Pomysł polega na wyborze k najbliższych sąsiadów przez każdy wątek z osobna, przy czym wątek o numerze n odpowiada, za zmierzenie odległości
+od obiektów treningowych o numerach n + i * rozmiar grupy, gdzie i \in N. (oczwiscie numerach ze zbioru treningowego).
+Jeśli każdy z wątków zakończy wyznaczanie swojej grupy k-elementowe (tu odpowiednia bariera w kodzie, na której każdy z wątków w obrębie grupy musi zaczekać na pozostałych) przechodzimy do wyboru istotnych k najbliższych sąsiadów.
+W tym celu sortujemy z osobna każdą do tej pory wyznaczoną grupę kandydującą, a następnie scalamy po dwie tablice o dlugosci k i wybieramy k najmniejszych elementów. W ten sposób po log_2(rozmiar grupy) krokach wyznaczamy k najblizszych sasiadow. 
+Od tego momentu algorytm przebiega tak jak w wersji 1.0: głosowanie i przyporządkowanie odpowiedzi.
+
+Dodatkowo wykorzystano charakterystyczne dla openCL metody optymalizacji np:
+* #pragma unroll K
+    dyrektywa umieszczana przed krótkimi pętlami, dzięki której ich wykonanie zostaje zoptymalizowane. 
+* binarne operacje 
+    zamieniono operacje mnożenia i dzielenia przez 2, na binarne przesunięcia w prawo i w lewo
+* nie przesyłamy stałych do jądra
+    parametry przekazywane są do jądra w trakcie kompilacji
+
+szacowany czas: O(n*d*k / rozmiar_grupy + k*log(k)), gdzie składnik k*log(k) wynika z sortowania z merge'owania wyników, jednak ma on się nijak do drugiego składnika tej sumy. Widzimy, że odpowiednio zwiększając rozmiar grupy możemy osiągnąć całkiem dobre przyspiesznie. 
+
+----------------------------------------
+
+5. Wersja 2.0
+
+Ostatnia wersja w której teoretyczna zmiana szacowanej złożoności na gorszą w rzeczywistości polepsza program. 
+Zrezygnowano z sortowania wyników obliczeń poszczególnych wątków na rzecz mergowania ich w czasie kwadratowym, rzeczywisty zysk opiera się na tym, że w zaimplementowanym nowym mergowaniu nie mamy tak wielu instrukcji skoku, dzięki czemu wątki działające na GPU mogą wykonywać się płynniej.
+Ponadto zmieniono konwencję przetrzymywania danych: 
+
+w tej wersji dane trningowe wczytujemy do tablicy posiadającej d wierszy i n kolumn, zaś testowe do d*q
+innymi słowy od teraz obiekt jest reprezentowany jako kolumna nie jak wiersz. Dzięki temu wątki pracujące w jednym warpie (grupa 32 wątków) może podczas jednej transakcji zapytać o segment danych. Zyskujemy w ten sposób istotne przyspieszenie pracy jądra.
+
+Poprawki naniesione na wersje 2.0 opierają się głównie o materiały znajdujące się na stronie:
+    http://developer.download.nvidia.com/CUDA/training/NVIDIA_GPU_Computing_Webinars_Best_Practises_For_OpenCL_Programming.pdf
+
+----------------------------------------
+
+6. Wydajność
+
+W wyniku zastosowanych przyspieszeń otrzymałem następujące (przybliżone rezultaty):
+* różnica pomiędzy wersją 1.0 a 1.5 wydaje się być nie duża choć algorytm zyskuje ok 15% przyspiesznie, 
+  głównie za sprawą użycia dyrektywy rozbicia pętli. Pozostałe zmiany dawały przyspieszenie marginalne i wydaje się, że miały znaczenie czysto kosmety  czne. Wersja 1.5 nie potrafiła wykonać testu z maksymalnymi danymi początkowymi w czasie < 5 minut
+* wersja 2.0 wykorzystała możliwości GPU znacznie lepiej, dzięki odpowiedniemy odczytywaniu danych z pamięci globalnej i ograniczeniu 
+  liczby transakcji program działał około osiem razy szybciej (sprawdzane na danych średniego rozmiaru n=10^5, q=10^4) oraz zdołał w czasie 
+  ~ 2.5 minuty wykonać obliczenie na maksymalnych danych wejściowych. 
+
+
+
+
